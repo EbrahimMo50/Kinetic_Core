@@ -153,8 +153,22 @@ def _build_preprocessor(X: DataFrame) -> ColumnTransformer:
 
 def _prepare_supervised_data(df: DataFrame,target_column: str,*,stratify: bool,balance: bool,):
     """Split, preprocess, and (optionally) SMOTE-resample a supervised dataset."""
+    # TODO discuss it with the team
+    # Drop rows where target is missing
+    df = df.dropna(subset=[target_column])
+    
     X = df.drop(columns=[target_column])
     y = df[target_column]
+
+    # TODO Discuss it with the team
+    if stratify:
+        # Drop rows with classes that have fewer than 2 members to allow stratification
+        counts = y.value_counts()
+        rare_classes = counts[counts < 2].index
+        if len(rare_classes) > 0:
+            mask = ~y.isin(rare_classes)
+            X = X[mask]
+            y = y[mask]
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y,
@@ -170,8 +184,23 @@ def _prepare_supervised_data(df: DataFrame,target_column: str,*,stratify: bool,b
     if balance:
         counts = y_train.value_counts()
         if len(counts) > 1 and (counts.min() / counts.max()) < IMBALANCE_RATIO:
-            smote = SMOTE(random_state=RANDOM_STATE)
-            X_train_pp, y_train = smote.fit_resample(X_train_pp, y_train)
+            # OLD CODE 
+            # smote = SMOTE(random_state=RANDOM_STATE)
+            # X_train_pp, y_train = smote.fit_resample(X_train_pp, y_train)
+            
+            # NEW CODE WITH DYNAMIC K_NEIGHBORS
+            # TODO discuss it with the team: dynamically set k_neighbors based on the smallest class size, since SMOTE's default of 5 can fail if the minority class has fewer than 6 samples.
+            # SMOTE requires at least k_neighbors + 1 samples in the minority class (default k_neighbors is 5)
+            # Find the actual minimum class size in training data
+            min_class_size = counts.min()
+            # Set k_neighbors to min_class_size - 1, but max 5, min 1
+            k_neighbors = min(5, max(1, min_class_size - 1))
+            
+            # If the minimum class size is 1, SMOTE cannot interpolate. We skip SMOTE or use RandomOverSampler, 
+            # but since k_neighbors >= 1 requires at least 2 samples, we only run SMOTE if min_class_size >= 2.
+            if min_class_size >= 2:
+                smote = SMOTE(sampling_strategy="auto", k_neighbors=k_neighbors, random_state=RANDOM_STATE)
+                X_train_pp, y_train = smote.fit_resample(X_train_pp, y_train)
 
     return X_train_pp, X_test_pp, y_train, y_test, preprocessor
 
