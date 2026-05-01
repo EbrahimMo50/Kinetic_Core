@@ -3,3 +3,9 @@ pandas
 scikit-learn 
 imbalanced-learn 
 xgboost
+category_encoders
+fastapi
+uvicorn
+python-multipart
+sqlalchemy
+openpyxl
