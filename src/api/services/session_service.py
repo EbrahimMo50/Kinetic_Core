@@ -86,24 +86,26 @@ class SessionService:
             File.artifact_type == FileType.MODEL.value
         ).order_by(File.id.asc()).all()
         
-        file_payload = []
-        file_id = None
+        files_array = []
 
         for file_record in files:
-            record = {
-                "file_id": file_record.id,
-                "file_name": file_record.original_name,
-                "type": file_record.artifact_type,
-                "mime_type": file_record.mime_type,
-            }
-            file_payload.append(record)
-            if file_id is None and str(file_record.original_name).lower().endswith(".pkl"):
-                file_id = file_record.id
+            extension = str(file_record.original_name).lower().split(".")[-1]
+            if extension not in {"pkl", "joblib"}:
+                extension = ""
 
-        if file_id is None and file_payload:
-            file_id = file_payload[0]["file_id"]
+            file_type = extension if extension else "other"
+            files_array.append({
+                "type": file_type,
+                "id": file_record.id,
+            })
 
         report = result.report or {}
+        if isinstance(report, dict):
+            best_model = report.get("best_model")
+            if not isinstance(best_model, dict):
+                best_model = {}
+            best_model["files"] = files_array
+            report["best_model"] = best_model
 
         return {
             "session_id": session_id,
