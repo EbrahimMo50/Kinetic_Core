@@ -1,7 +1,10 @@
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Integer, Float, Text
+from enum import Enum
+
+from sqlalchemy import Column, String, DateTime, Integer, Text, ForeignKey, Enum as SAEnum
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.sqlite import JSON
+from sqlalchemy.orm import relationship
 
 Base = declarative_base()
 
@@ -14,63 +17,46 @@ class Session(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_accessed = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
-
-class Dataset(Base):
-    """
-    Represents an uploaded dataset
-    Contains:
-    - session_id: Session identifier
-    - file_name: Original filename
-    - file_path: Path where dataset was uploaded
-    """
-    __tablename__ = "datasets"
-    
-    dataset_id = Column(String(36), primary_key=True, index=True)
-    session_id = Column(String(36), nullable=False, index=True)
-    file_name = Column(String(255), nullable=False)
-    file_path = Column(String(500), nullable=False)  # Path where uploaded
-    file_size_bytes = Column(Integer, nullable=True)
-    
-    # Dataset metadata
-    row_count = Column(Integer, nullable=True)
-    column_count = Column(Integer, nullable=True)
-    columns_info = Column(JSON, nullable=True)  # {column_name: data_type}
-    
-    # Timestamps
-    uploaded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    
-    class Config:
-        """Example usage"""
-        pass
+    result = relationship("Result", back_populates="session", uselist=False)
 
 
-class TrainingJob(Base):
-    """Represents a training job for a session"""
-    __tablename__ = "training_jobs"
-    
-    job_id = Column(String(36), primary_key=True, index=True)
-    session_id = Column(String(36), nullable=False, index=True)
-    dataset_id = Column(String(36), nullable=False, index=True)
-    task_type = Column(String(20), nullable=False)  # "classification", "regression", "clustering"
-    status = Column(String(20), default="pending", nullable=False)  # pending, training, completed, failed
-    started_at = Column(DateTime, nullable=True)
-    completed_at = Column(DateTime, nullable=True)
+class ResultStatus(str, Enum):
+    IN_PROGRESS = "IN_PROGRESS"
+    DONE = "DONE"
+    FAILED = "FAILED"
+
+
+class Result(Base):
+    __tablename__ = "results"
+
+    session_id = Column(String(36), ForeignKey("sessions.session_id"), primary_key=True, index=True)
+    report = Column(JSON, nullable=True)
+    status = Column(SAEnum(ResultStatus, native_enum=False), default=ResultStatus.IN_PROGRESS.value, nullable=False)
     error_message = Column(Text, nullable=True)
-
-
-class Model(Base):
-    """Represents a trained model"""
-    __tablename__ = "models"
-    
-    model_id = Column(String(36), primary_key=True, index=True)
-    session_id = Column(String(36), nullable=False, index=True)
-    dataset_id = Column(String(36), nullable=False, index=True)
-    job_id = Column(String(36), nullable=False, index=True)
-    task_type = Column(String(20), nullable=False)
-    model_type = Column(String(50), nullable=False)  # e.g., "RandomForestClassifier"
-    file_path = Column(String(255), nullable=False)
-    file_name = Column(String(255), nullable=False)
-    file_size_bytes = Column(Integer, nullable=True)
-    metrics = Column(JSON, nullable=False)  # Store all metrics as JSON
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    training_time_seconds = Column(Float, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    session = relationship("Session", back_populates="result")
+    files = relationship("File", back_populates="result", cascade="all, delete-orphan", primaryjoin="Result.session_id==File.result_session_id")
+
+
+class FileType(str, Enum):
+    DATASET = "DATASET"
+    MODEL = "MODEL"
+    OTHER = "OTHER"
+
+
+class File(Base):
+    __tablename__ = "files"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(36), ForeignKey("sessions.session_id"), nullable=False, index=True)
+    result_session_id = Column(String(36), ForeignKey("results.session_id"), nullable=True, index=True)
+    artifact_type = Column(String(20), nullable=False)
+    original_name = Column(String(255), nullable=False)
+    path = Column(String(500), nullable=False)
+    mime_type = Column(String(100), nullable=True)
+    artifact_metadata = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    result = relationship("Result", back_populates="files")

@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Form
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, HTTPException, Form
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 from pathlib import Path
 from typing import Optional
@@ -8,25 +8,32 @@ import io
 import uuid
 
 from src.api.db.db_engine import get_db
-from src.api.services.ml_service import MLService
+from src.api.services.file_service import FileService
+from src.api.services.training_service import TrainingService
+from src.api.services.session_service import SessionService
 
 router = APIRouter()
 
-@router.post("/dataset")
+@router.post("/train")
 async def upload_dataset(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    session_id: Optional[str] = Form(None),
+    task_type: str = Form(...),
+    target_column: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     """
-    Upload a dataset for machine learning.
+    Upload a dataset, create a session, and queue model training.
     """
     valid_extensions = ('.csv', '.xlsx', '.xls')
     if not file.filename.lower().endswith(valid_extensions):
         raise HTTPException(status_code=400, detail=f"Only {', '.join(valid_extensions)} files are supported")
+
+    valid_tasks = ["classification", "regression", "clustering"]
+    if task_type not in valid_tasks:
+        raise HTTPException(status_code=400, detail=f"Invalid task_type. Must be one of {valid_tasks}")
         
-    if not session_id:
-        session_id = str(uuid.uuid4())
+    session_id = str(uuid.uuid4())
         
     try:
         content = await file.read()
@@ -38,52 +45,38 @@ async def upload_dataset(
             df = pd.read_excel(io.BytesIO(content))
             
         
-        upload_dir = Path("data/uploads")
+        upload_dir = Path("uploads") / session_id
         upload_dir.mkdir(parents=True, exist_ok=True)
-        local_file_path = str(upload_dir / f"{session_id}.{file_ext}")
+        local_file_path = str(upload_dir / file.filename)
         
         if file_ext == 'csv':
             df.to_csv(local_file_path, index=False)
         elif file_ext in ['xlsx', 'xls']:
             df.to_excel(local_file_path, index=False)
+
+        SessionService.ensure_session_result(db, session_id)
         
-        result = MLService.set_dataset(
+        result = FileService.set_dataset(
             db=db,
             session_id=session_id,
             dataset=df,
             file_name=file.filename,
             file_path=local_file_path
         )   
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/train")
-async def train_model(
-    session_id: str = Form(...),
-    dataset_id: str = Form(...),
-    task_type: str = Form(...),
-    target_column: Optional[str] = Form(None),
-    db: Session = Depends(get_db)
-):
-    """
-    Train models according to the task_type and return the best model.
-    """
-    valid_tasks = ["classification", "regression", "clustering"]
-    if task_type not in valid_tasks:
-        raise HTTPException(status_code=400, detail=f"Invalid task_type. Must be one of {valid_tasks}")
-        
-    try:
-        result = MLService.train_model(
-            db=db,
-            session_id=session_id,
-            dataset_id=dataset_id,
-            task_type=task_type,
-            target_column=target_column
+        background_tasks.add_task(
+            TrainingService.train_model_background,
+            session_id,
+            result["dataset_id"],
+            task_type,
+            target_column,
         )
-        return result
-    except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve))
+
+        return {
+            "session_id": session_id,
+            "dataset_id": result["dataset_id"],
+            "status": "queued",
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -93,33 +86,33 @@ async def get_results(
     db: Session = Depends(get_db)
 ):
     """
-    Retrieve the results of the best model trained on the data.
+    Poll the training result for a session.
     """
     try:
-        result = MLService.get_model_results(db, session_id)
+        result = SessionService.get_model_results(db, session_id)
+        if result.get("status") == "in_progress":
+            return JSONResponse(
+                status_code=200,
+                content={"session_id": session_id, "status": "in_progress"},
+            )
         return result
     except ValueError as ve:
         raise HTTPException(status_code=404, detail=str(ve))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/model/{session_id}")
-async def download_model(
-    session_id: str,
-    format_type: str = "pkl",
+@router.get("/files/{file_id}")
+async def download_file(
+    file_id: int,
     db: Session = Depends(get_db)
 ):
     """
-    Retrieve the saved model in either joblib or pkl format as requested.
+    Download a trained model artifact by file id.
     """
-    if format_type not in ["pkl", "joblib"]:
-        raise HTTPException(status_code=400, detail="format_type must be either 'pkl' or 'joblib'")
-        
     try:
-        file_path, file_name = MLService.get_model_file(
-            db=db, 
-            session_id=session_id, 
-            format_type=format_type
+        file_path, file_name = FileService.get_model_file(
+            db=db,
+            file_id=file_id,
         )
         return FileResponse(
             path=file_path,
@@ -132,3 +125,5 @@ async def download_model(
         raise HTTPException(status_code=404, detail=str(fnfe))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
