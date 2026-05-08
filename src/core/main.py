@@ -18,7 +18,7 @@ from sklearn.metrics import (
     recall_score,
     silhouette_score,
 )
-from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.model_selection import train_test_split  # GridSearchCV: used by commented-out hyperparameter search
 from sklearn.pipeline import FunctionTransformer, Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, RobustScaler
 from sklearn.svm import SVC
@@ -30,6 +30,11 @@ from sklearn.decomposition import PCA
 # ---------------------------------------------------------------------------
 # Shared constants & helpers
 # ---------------------------------------------------------------------------
+
+
+def _cast_to_object(X):
+    """Named function so the fitted preprocessor pipeline can be pickled."""
+    return X.astype(object)
 
 RANDOM_STATE = 42
 TEST_SIZE = 0.2
@@ -127,14 +132,14 @@ def _build_preprocessor(X: DataFrame) -> ColumnTransformer:
 
     categorical_nominal_pipeline  = Pipeline([
         ("to_object", FunctionTransformer(
-            lambda X_: X_.astype(object), feature_names_out="one-to-one"
+            _cast_to_object, feature_names_out="one-to-one"
         )),
         ("impute", SimpleImputer(strategy="most_frequent")),
         ("encode", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
     ])
     categorical_high_pipeline  = Pipeline([
         ("to_object", FunctionTransformer(
-            lambda X_: X_.astype(object), feature_names_out="one-to-one"
+            _cast_to_object, feature_names_out="one-to-one"
         )),
         ("impute", SimpleImputer(strategy="most_frequent")),
         ("encode", CountEncoder(normalize=True)),
@@ -294,33 +299,37 @@ def get_classification_models(df: DataFrame, target_column: str) -> list[dict]:
         df, target_column, stratify=True, balance=True
     )
 
-    rf_param_grid = {
-        "n_estimators": [200],
-        "max_depth": [None, 10, 20],
-        "min_samples_split": [2, 10],
-        "min_samples_leaf": [1, 4],
-        "max_features": ["sqrt"],
-    }
-    rf_search = GridSearchCV(
-        RandomForestClassifier(random_state=RANDOM_STATE, n_jobs=-1),
-        param_grid=rf_param_grid,
-        cv=5,
-        scoring="f1_weighted",
-        n_jobs=-1,
-        verbose=1,
-    )
-    rf_search.fit(X_train, y_train)
-    rf_model = rf_search.best_estimator_
+    # rf_param_grid = {
+    #     "n_estimators": [200],
+    #     "max_depth": [None, 10, 20],
+    #     "min_samples_split": [2, 10],
+    #     "min_samples_leaf": [1, 4],
+    #     "max_features": ["sqrt"],
+    # }
+    # rf_search = GridSearchCV(
+    #     RandomForestClassifier(random_state=RANDOM_STATE, n_jobs=-1),
+    #     param_grid=rf_param_grid,
+    #     cv=5,
+    #     scoring="f1_weighted",
+    #     n_jobs=-1,
+    #     verbose=1,
+    # )
+    # rf_search.fit(X_train, y_train)
+    # rf_model = rf_search.best_estimator_
+    rf_model = RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE, n_jobs=-1)
+    rf_model.fit(X_train, y_train)
 
-    svm_search = GridSearchCV(
-        SVC(kernel="rbf", probability=True, random_state=RANDOM_STATE),
-        param_grid={"C": [0.1, 1, 10, 100], "gamma": ["scale", "auto"]},
-        cv=5,
-        scoring="f1_weighted",
-        n_jobs=-1,
-    )
-    svm_search.fit(X_train, y_train)
-    svm_model = svm_search.best_estimator_
+    # svm_search = GridSearchCV(
+    #     SVC(kernel="rbf", probability=True, random_state=RANDOM_STATE),
+    #     param_grid={"C": [0.1, 1, 10, 100], "gamma": ["scale", "auto"]},
+    #     cv=5,
+    #     scoring="f1_weighted",
+    #     n_jobs=-1,
+    # )
+    # svm_search.fit(X_train, y_train)
+    # svm_model = svm_search.best_estimator_
+    svm_model = SVC(kernel="rbf", probability=True, random_state=RANDOM_STATE)
+    svm_model.fit(X_train, y_train)
 
     # Bundle preprocessor + model so the saved artifact works on raw data.
     rf_pipeline  = Pipeline([("preprocessor", preprocessor), ("estimator", rf_model)])
