@@ -3,6 +3,7 @@ from typing import Any, Dict
 from sqlalchemy.orm import Session as DBSession
 
 from src.api.db.models import Result, ResultStatus, File, FileType, Session as SessionRecord
+from src.api.services.visualization_service import VisualizationService
 
 
 class SessionService:
@@ -100,6 +101,7 @@ class SessionService:
             })
 
         report = result.report or {}
+        visualization = None
         if isinstance(report, dict):
             best_model = report.get("best_model")
             if not isinstance(best_model, dict):
@@ -107,8 +109,22 @@ class SessionService:
             best_model["files"] = files_array
             report["best_model"] = best_model
 
+            task_type   = report.get("task_type", "")
+            model_type  = best_model.get("model_type", "")
+            metrics     = best_model.get("metrics") or {}
+            train_time  = report.get("training_time_seconds")
+
+            if task_type and model_type:
+                visualization = VisualizationService.build(
+                    task_type=task_type,
+                    model_type=model_type,
+                    metrics=metrics,
+                    training_time_seconds=train_time,
+                )
+
         return {
             "session_id": session_id,
             "status": status_value,
             "report": report,
+            "visualization": visualization,
         }

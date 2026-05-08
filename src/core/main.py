@@ -153,22 +153,17 @@ def _build_preprocessor(X: DataFrame) -> ColumnTransformer:
 
 def _prepare_supervised_data(df: DataFrame,target_column: str,*,stratify: bool,balance: bool,):
     """Split, preprocess, and (optionally) SMOTE-resample a supervised dataset."""
-    # TODO discuss it with the team
-    # Drop rows where target is missing
     df = df.dropna(subset=[target_column])
     
     X = df.drop(columns=[target_column])
     y = df[target_column]
 
-    # TODO Discuss it with the team
     if stratify:
-        # Drop rows with classes that have fewer than 2 members to allow stratification
+        # If any class has fewer than 2 samples stratification will fail, so fall back
+        # to an unstratified split — no rows are dropped so evaluation stays honest.
         counts = y.value_counts()
-        rare_classes = counts[counts < 2].index
-        if len(rare_classes) > 0:
-            mask = ~y.isin(rare_classes)
-            X = X[mask]
-            y = y[mask]
+        if (counts < 2).any():
+            stratify = False
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y,
@@ -184,14 +179,6 @@ def _prepare_supervised_data(df: DataFrame,target_column: str,*,stratify: bool,b
     if balance:
         counts = y_train.value_counts()
         if len(counts) > 1 and (counts.min() / counts.max()) < IMBALANCE_RATIO:
-            # OLD CODE 
-            # smote = SMOTE(random_state=RANDOM_STATE)
-            # X_train_pp, y_train = smote.fit_resample(X_train_pp, y_train)
-            
-            # NEW CODE WITH DYNAMIC K_NEIGHBORS
-            # TODO discuss it with the team: dynamically set k_neighbors based on the smallest class size, since SMOTE's default of 5 can fail if the minority class has fewer than 6 samples.
-            # SMOTE requires at least k_neighbors + 1 samples in the minority class (default k_neighbors is 5)
-            # Find the actual minimum class size in training data
             min_class_size = counts.min()
             # Set k_neighbors to min_class_size - 1, but max 5, min 1
             k_neighbors = min(5, max(1, min_class_size - 1))
@@ -236,37 +223,52 @@ def _regression_report(model, X_test, y_test) -> dict:
 
 def get_regression_models(df: DataFrame, target_column: str) -> list[dict]:
     # Regression target is continuous, so no stratification and no SMOTE.
-    X_train, X_test, y_train, y_test, _ = _prepare_supervised_data(
+    X_train, X_test, y_train, y_test, preprocessor = _prepare_supervised_data(
         df, target_column, stratify=False, balance=False
     )
 
-    # Carve a validation set out of the training data for XGBoost early stopping.
+    # Phase 1 — find best n_estimators via early stopping on a held-out probe set.
     X_tr, X_val, y_tr, y_val = train_test_split(
         X_train, y_train, test_size=TEST_SIZE, random_state=RANDOM_STATE
     )
-
-    xgb_model = XGBRegressor(
-        n_estimators=2000,  # ceiling — early stopping will trim this
+    xgb_probe = XGBRegressor(
+        n_estimators=2000,
         learning_rate=0.05,
         early_stopping_rounds=50,
         eval_metric="rmse",
         random_state=RANDOM_STATE,
         n_jobs=-1,
     )
-    xgb_model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
+    xgb_probe.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
+    best_n = xgb_probe.best_iteration + 1
+
+    # Phase 2 — retrain on the full training set with the determined depth.
+    xgb_model = XGBRegressor(
+        n_estimators=best_n,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=RANDOM_STATE,
+        n_jobs=-1,
+    )
+    xgb_model.fit(X_train, y_train)
 
     ridge_model = RidgeCV(alphas=np.logspace(-3, 3, 50), scoring="r2")
     ridge_model.fit(X_train, y_train)
 
+    # Bundle preprocessor + model so the saved artifact works on raw data.
+    xgb_pipeline   = Pipeline([("preprocessor", preprocessor), ("estimator", xgb_model)])
+    ridge_pipeline  = Pipeline([("preprocessor", preprocessor), ("estimator", ridge_model)])
+
     results = [
         {
             "model_type": XGBRegressor,
-            "model": xgb_model,
+            "model": xgb_pipeline,
             "report": _regression_report(xgb_model, X_test, y_test),
         },
         {
             "model_type": RidgeCV,
-            "model": ridge_model,
+            "model": ridge_pipeline,
             "report": _regression_report(ridge_model, X_test, y_test),
         },
     ]
@@ -288,7 +290,7 @@ def _classification_report(model, X_test, y_test) -> dict:
 
 
 def get_classification_models(df: DataFrame, target_column: str) -> list[dict]:
-    X_train, X_test, y_train, y_test, _ = _prepare_supervised_data(
+    X_train, X_test, y_train, y_test, preprocessor = _prepare_supervised_data(
         df, target_column, stratify=True, balance=True
     )
 
@@ -310,18 +312,29 @@ def get_classification_models(df: DataFrame, target_column: str) -> list[dict]:
     rf_search.fit(X_train, y_train)
     rf_model = rf_search.best_estimator_
 
-    svm_model = SVC(kernel="rbf", probability=True, random_state=RANDOM_STATE)
-    svm_model.fit(X_train, y_train)
+    svm_search = GridSearchCV(
+        SVC(kernel="rbf", probability=True, random_state=RANDOM_STATE),
+        param_grid={"C": [0.1, 1, 10, 100], "gamma": ["scale", "auto"]},
+        cv=5,
+        scoring="f1_weighted",
+        n_jobs=-1,
+    )
+    svm_search.fit(X_train, y_train)
+    svm_model = svm_search.best_estimator_
+
+    # Bundle preprocessor + model so the saved artifact works on raw data.
+    rf_pipeline  = Pipeline([("preprocessor", preprocessor), ("estimator", rf_model)])
+    svm_pipeline = Pipeline([("preprocessor", preprocessor), ("estimator", svm_model)])
 
     results = [
         {
             "model_type": RandomForestClassifier,
-            "model": rf_model,
+            "model": rf_pipeline,
             "report": _classification_report(rf_model, X_test, y_test),
         },
         {
             "model_type": SVC,
-            "model": svm_model,
+            "model": svm_pipeline,
             "report": _classification_report(svm_model, X_test, y_test),
         },
     ]
@@ -352,14 +365,29 @@ def get_clustering_models(df: DataFrame) -> list[dict]:
     else:
         X_pca = X_pp
 
-    # --- DBSCAN -------------------------------------------------------------
-    dbscan = DBSCAN(eps=0.5, min_samples=5)
+    # --- DBSCAN — sweep eps to find the best silhouette rather than relying on a fixed value ---
+    _eps_candidates = [0.3, 0.5, 0.7, 1.0, 1.5, 2.0]
+    dbscan = DBSCAN(eps=_eps_candidates[0], min_samples=5)
     db_labels = dbscan.fit_predict(X_pca)
+    _best_db_sil = _safe_silhouette(X_pca, db_labels)
     db_report = {
-        "silhouette": _safe_silhouette(X_pca, db_labels),
+        "silhouette": _best_db_sil,
         "n_clusters": int(len(set(db_labels) - {-1})),
         "n_noise": int((db_labels == -1).sum()),
     }
+    for _eps in _eps_candidates[1:]:
+        _candidate = DBSCAN(eps=_eps, min_samples=5)
+        _labels = _candidate.fit_predict(X_pca)
+        _sil = _safe_silhouette(X_pca, _labels)
+        if not np.isnan(_sil) and (np.isnan(_best_db_sil) or _sil > _best_db_sil):
+            _best_db_sil = _sil
+            dbscan = _candidate
+            db_labels = _labels
+            db_report = {
+                "silhouette": _sil,
+                "n_clusters": int(len(set(_labels) - {-1})),
+                "n_noise": int((_labels == -1).sum()),
+            }
 
     # --- KMeans (pick k by silhouette) --------------------------------------
     k_range = list(range(2, 11))
